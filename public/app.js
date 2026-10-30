@@ -1660,10 +1660,10 @@ async function uploadImage(file, keep = false) {
 }
 // Whisper on the server's GPU (beast-whisper service, started on demand): same engine on the laptop and the phone.
 // Falls back to the browser's own speech recognition when the service is down.
-const WHISPER = { ok: false, at: 0 };
+const WHISPER = { ok: false, at: 0, why: '' };   // why: the server's reason when it isn't usable (not set up / failed to start)
 let actx = null;
 function beep(freq = 880, ms = 140) { try { actx = actx || new (window.AudioContext || window.webkitAudioContext)(); if (actx.state === 'suspended') actx.resume(); const o = actx.createOscillator(), g = actx.createGain(); o.frequency.value = freq; o.connect(g); g.connect(actx.destination); const t = actx.currentTime; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.25, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + ms / 1000); o.start(t); o.stop(t + ms / 1000 + 0.02); } catch {} }
-async function whisperUp() { if (Date.now() - WHISPER.at < 60000) return WHISPER.ok; WHISPER.at = Date.now(); try { const r = await fetch('/api/transcribe', { cache: 'no-store' }); WHISPER.ok = r.ok && (await r.json()).ok === true; } catch { WHISPER.ok = false; } return WHISPER.ok; }
+async function whisperUp() { if (Date.now() - WHISPER.at < 60000) return WHISPER.ok; WHISPER.at = Date.now(); try { const r = await fetch('/api/transcribe', { cache: 'no-store' }); const j = await r.json(); WHISPER.ok = r.ok && j.ok === true; WHISPER.why = WHISPER.ok ? '' : j.error || ''; } catch { WHISPER.ok = false; WHISPER.why = ''; } return WHISPER.ok; }
 whisperUp();
 function voiceButton(ta, chatKey) {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1708,7 +1708,7 @@ function voiceButton(ta, chatKey) {
     rec.onresult = e => { interim = ''; for (let i = e.resultIndex; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) final += r[0].transcript.trim() + ' '; else interim += r[0].transcript; } show(); };
     rec.onerror = e => {
       if (e.error === 'no-speech' || e.error === 'aborted') return;           // silence / our own restart: onend takes it from here
-      toast(e.error === 'not-allowed' ? 'microphone not allowed — allow it when iOS asks' : 'voice: ' + e.error, 'err'); finish();
+      toast(e.error === 'not-allowed' ? 'microphone not allowed — allow it when iOS asks' : 'voice: ' + (e.error === 'network' || e.error === 'service-not-allowed' ? `the browser's speech recognition isn't working here (${e.error})` : e.error) + (WHISPER.why ? ' — ' + WHISPER.why : ''), 'err'); finish();
     };
     rec.onend = () => {
       if (!active) return;
@@ -1720,10 +1720,11 @@ function voiceButton(ta, chatKey) {
     return rec;
   };
   const begin = () => {
+    // nothing to record with (no Whisper, no browser speech): say why instead of opening the sheet; re-check for the next tap
+    if (!(canRec && WHISPER.ok) && !SR) { toast('voice: ' + (WHISPER.why || 'Whisper on the server is not running'), 'err'); WHISPER.at = 0; whisperUp(); return; }
     active = true; clearTimeout(settle); final = ''; interim = ''; restarts = [];
     b.classList.add('rec'); document.body.classList.add('recording'); openOverlay();
     if (canRec && WHISPER.ok) { startWhisper(); return; }
-    if (!SR) { toast('voice: Whisper on the server is not running', 'err'); finish(); return; }
     try { ensure().start(); } catch (e) { try { rec.abort(); } catch {} rec = null; try { ensure().start(); } catch { toast('voice unavailable', 'err'); finish(); } }
   };
   // ---- Whisper engine: record the whole thing with MediaRecorder; on Stop the one audio file goes to the server and
@@ -1776,11 +1777,13 @@ function voiceButton(ta, chatKey) {
     const note = t => { whisperNote = t; if (my === gen && ov) micStatus(!!(mr && mr.state === 'recording')); };
     let j = null; try { j = await (await fetch('/api/transcribe?warm=1', { cache: 'no-store' })).json(); } catch {}
     if (j && j.loaded) return;
+    if (j && j.failed) { note('Whisper failed to start'); return; }
     const w0 = Date.now(); note('Whisper waking');
     while (active && my === gen && Date.now() - w0 < 45000) {
       await new Promise(r => setTimeout(r, 400));
       try { j = await (await fetch('/api/transcribe', { cache: 'no-store' })).json(); } catch { j = null; }
       if (j && j.loaded) { note(''); return; }
+      if (j && j.failed) { note('Whisper failed to start'); return; }
     }
     if (active && my === gen) note('Whisper did not wake up');
   }
